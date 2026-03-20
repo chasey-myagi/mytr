@@ -51,20 +51,40 @@ export function createTooltip(selectionRect: DOMRect): HTMLElement {
   shadow.innerHTML = `
     <style>
       :host { all: initial; }
+      @keyframes mytr-fade-in {
+        from { opacity: 0; transform: translateY(4px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      @keyframes mytr-pulse {
+        0%, 100% { opacity: 0.4; }
+        50% { opacity: 0.7; }
+      }
+      @keyframes mytr-blink {
+        50% { opacity: 0; }
+      }
       .mytr-tooltip {
         background: #1e1e2e;
         color: #cdd6f4;
         border-radius: 8px;
+        border: 1px solid rgba(69, 71, 90, 0.6);
+        border-top: 2px solid rgba(137, 180, 250, 0.3);
         padding: 12px 16px;
         font-size: 14px;
         line-height: 1.6;
         max-width: ${tooltipWidth}px;
-        box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.2);
         font-family: system-ui, sans-serif;
         word-wrap: break-word;
+        animation: mytr-fade-in 0.15s ease;
       }
       .mytr-tooltip-loading {
-        opacity: 0.6;
+        animation: mytr-pulse 1.5s ease-in-out infinite;
+      }
+      .mytr-tooltip-streaming::after {
+        content: '|';
+        animation: mytr-blink 1s step-end infinite;
+        opacity: 0.4;
+        margin-left: 1px;
       }
     </style>
     <div class="mytr-tooltip">
@@ -84,9 +104,18 @@ export function appendToTooltip(text: string): void {
 
   if (content.classList.contains('mytr-tooltip-loading')) {
     content.classList.remove('mytr-tooltip-loading');
+    content.classList.add('mytr-tooltip-streaming');
     content.textContent = '';
   }
   content.textContent = (content.textContent ?? '') + text;
+}
+
+export function markTooltipDone(): void {
+  const host = document.querySelector(`[${TOOLTIP_ATTR}]`);
+  if (!host?.shadowRoot) return;
+  const content = host.shadowRoot.querySelector('.mytr-tooltip-content');
+  if (!content) return;
+  content.classList.remove('mytr-tooltip-streaming');
 }
 
 export function removeTooltip(): void {

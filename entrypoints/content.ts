@@ -1,6 +1,6 @@
 import { extractTextBlocks } from '../lib/translator/extractor';
-import { injectTranslation, appendToTranslation, removeAllTranslations, setDisplayMode } from '../lib/translator/injector';
-import { setupSelectionListeners, createTooltip, appendToTooltip, removeTooltip, getSelectedText } from '../lib/translator/selector';
+import { injectTranslation, appendToTranslation, removeAllTranslations, setDisplayMode, markStreamingDone } from '../lib/translator/injector';
+import { setupSelectionListeners, createTooltip, appendToTooltip, markTooltipDone, removeTooltip, getSelectedText } from '../lib/translator/selector';
 import { createBatches } from '../lib/translator/batcher';
 import { createVisibilityObserver, createMutationWatcher, createRouteWatcher, debounce } from '../lib/translator/observer';
 import { sendToBackground, createMessage } from '../lib/messaging/bridge';
@@ -90,7 +90,7 @@ export default defineContentScript({
         case 'selection-chunk':
           appendToTooltip(message.payload.chunk as string);
           if (message.payload.done) {
-            // tooltip stays visible, user closes manually
+            markTooltipDone();
           }
           break;
 
@@ -241,6 +241,7 @@ export default defineContentScript({
         appendToTranslation(blockId, chunk);
       }
       if (done) {
+        markStreamingDone(blockId);
         pendingBlocks.delete(blockId);
         pendingVisible.delete(blockId);
       }
