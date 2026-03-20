@@ -4,11 +4,31 @@ import {
   appendToTranslation,
   removeAllTranslations,
   setDisplayMode,
+  ensureStylesInjected,
+  markStreamingDone,
 } from '@/lib/translator/injector';
 import type { DisplayMode } from '@/lib/providers/types';
 
 beforeEach(() => {
   document.body.innerHTML = '';
+  // Clean up injected style tag between tests
+  document.getElementById('mytr-styles')?.remove();
+});
+
+describe('ensureStylesInjected', () => {
+  it('injects a style tag with id mytr-styles', () => {
+    ensureStylesInjected();
+    const style = document.getElementById('mytr-styles');
+    expect(style).not.toBeNull();
+    expect(style?.tagName).toBe('STYLE');
+  });
+
+  it('only injects one style tag even when called multiple times', () => {
+    ensureStylesInjected();
+    ensureStylesInjected();
+    const styles = document.querySelectorAll('#mytr-styles');
+    expect(styles.length).toBe(1);
+  });
 });
 
 describe('injectTranslation', () => {
@@ -31,6 +51,40 @@ describe('injectTranslation', () => {
 
     const translations = document.querySelectorAll('.mytr-translation');
     expect(translations.length).toBe(1);
+  });
+
+  it('adds mytr-streaming class by default', () => {
+    document.body.innerHTML = '<p data-mytr-id="block-1">Hello</p>';
+    const source = document.querySelector('p')!;
+    injectTranslation('block-1', source);
+
+    const translation = document.querySelector('.mytr-translation');
+    expect(translation?.classList.contains('mytr-streaming')).toBe(true);
+  });
+
+  it('injects style tag into head', () => {
+    document.body.innerHTML = '<p data-mytr-id="block-1">Hello</p>';
+    const source = document.querySelector('p')!;
+    injectTranslation('block-1', source);
+
+    expect(document.getElementById('mytr-styles')).not.toBeNull();
+  });
+});
+
+describe('markStreamingDone', () => {
+  it('removes mytr-streaming class from translation element', () => {
+    document.body.innerHTML = '<p data-mytr-id="block-1">Hello</p>';
+    const source = document.querySelector('p')!;
+    injectTranslation('block-1', source);
+
+    markStreamingDone('block-1');
+
+    const translation = document.querySelector('.mytr-translation');
+    expect(translation?.classList.contains('mytr-streaming')).toBe(false);
+  });
+
+  it('does nothing if element does not exist', () => {
+    expect(() => markStreamingDone('nonexistent')).not.toThrow();
   });
 });
 
