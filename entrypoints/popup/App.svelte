@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { slide } from 'svelte/transition';
   import { createMessage } from '../../lib/messaging/bridge';
   import ProviderSettings from './ProviderSettings.svelte';
   import PreferenceSettings from './PreferenceSettings.svelte';
@@ -50,7 +51,7 @@
         <span class="chevron" class:open={providerOpen}>▾</span>
       </button>
       {#if providerOpen}
-        <div class="section-body">
+        <div class="section-body" transition:slide={{ duration: 200 }}>
           <ProviderSettings />
         </div>
       {/if}
@@ -66,7 +67,7 @@
         <span class="chevron" class:open={preferenceOpen}>▾</span>
       </button>
       {#if preferenceOpen}
-        <div class="section-body">
+        <div class="section-body" transition:slide={{ duration: 200 }}>
           <PreferenceSettings />
         </div>
       {/if}
@@ -82,7 +83,7 @@
         <span class="chevron" class:open={behaviorOpen}>▾</span>
       </button>
       {#if behaviorOpen}
-        <div class="section-body">
+        <div class="section-body" transition:slide={{ duration: 200 }}>
           <BehaviorSettings />
         </div>
       {/if}
@@ -98,7 +99,7 @@
         <span class="chevron" class:open={siteRulesOpen}>▾</span>
       </button>
       {#if siteRulesOpen}
-        <div class="section-body">
+        <div class="section-body" transition:slide={{ duration: 200 }}>
           <SiteRules />
         </div>
       {/if}

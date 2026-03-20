@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { fade } from 'svelte/transition';
   import { getProviderConfig, saveProviderConfig } from '../../lib/storage/settings';
   import type { ProviderConfig } from '../../lib/providers/types';
 
@@ -75,6 +76,9 @@
       placeholder="sk-..."
       autocomplete="off"
     />
+    {#if !config.apiKey}
+      <div class="api-key-hint">未配置 API Key — 翻译功能需要配置后使用</div>
+    {/if}
   </div>
 
   <div class="field">
@@ -100,7 +104,7 @@
   </div>
 
   {#if saveStatus}
-    <div class="save-status">{saveStatus}</div>
+    <div class="save-status" transition:fade={{ duration: 150 }}>{saveStatus}</div>
   {/if}
 </div>
 
@@ -164,6 +168,12 @@
 
   input::placeholder {
     color: #585b70;
+  }
+
+  .api-key-hint {
+    font-size: 11px;
+    color: #a6adc8;
+    font-style: italic;
   }
 
   .save-status {

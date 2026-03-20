@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { fade } from 'svelte/transition';
   import { getPreferences, savePreferences } from '../../lib/storage/settings';
   import type { Preferences } from '../../lib/storage/settings';
 
@@ -86,7 +87,7 @@
   </div>
 
   {#if saveStatus}
-    <div class="save-status">{saveStatus}</div>
+    <div class="save-status" transition:fade={{ duration: 150 }}>{saveStatus}</div>
   {/if}
 </div>
 
