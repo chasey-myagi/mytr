@@ -32,37 +32,95 @@ export function createBatches(
 export interface ParsedSegment {
   index: number;
   text: string;
+  done: boolean;
 }
 
 export async function* parseSepStream(
   stream: AsyncIterable<string>,
   expectedCount: number,
 ): AsyncIterable<ParsedSegment> {
+  // buffer holds unconsumed input; segmentBuffer holds text accumulated for current segment
   let buffer = '';
+  let segmentBuffer = '';
   let segmentIndex = 0;
+  // Track whether the current segment has had its number prefix stripped already
+  let prefixStripped = false;
 
   for await (const chunk of stream) {
     buffer += chunk;
 
-    // Try to extract complete segments separated by [SEP]
-    while (true) {
+    // Process as much of the buffer as possible
+    while (buffer.length > 0) {
       const sepIndex = buffer.indexOf('[SEP]');
-      if (sepIndex === -1) break;
 
-      const segment = buffer.slice(0, sepIndex).trim();
-      buffer = buffer.slice(sepIndex + '[SEP]'.length);
+      if (sepIndex === -1) {
+        // No complete [SEP] in buffer — but guard against partial [SEP] at the end.
+        // Keep up to 4 trailing characters in reserve in case [SEP] is split across chunks.
+        const safeLength = Math.max(0, buffer.length - 4);
+        if (safeLength === 0) break;
 
-      if (segment) {
-        yield { index: segmentIndex, text: stripNumberPrefix(segment) };
+        const safe = buffer.slice(0, safeLength);
+        buffer = buffer.slice(safeLength);
+
+        // Strip leading number prefix from the very first emission of each segment
+        let emit = safe;
+        if (!prefixStripped) {
+          const combined = segmentBuffer + emit;
+          const stripped = stripNumberPrefix(combined);
+          if (stripped !== combined) {
+            // Prefix was present and stripped
+            segmentBuffer = '';
+            emit = stripped;
+            prefixStripped = true;
+          } else if (combined.length >= 10) {
+            // Enough data to know there's no prefix — commit it
+            segmentBuffer = '';
+            emit = combined;
+            prefixStripped = true;
+          } else {
+            // Accumulate a bit more before deciding
+            segmentBuffer = combined;
+            break;
+          }
+        }
+
+        if (emit) {
+          yield { index: segmentIndex, text: emit, done: false };
+        }
+      } else {
+        // [SEP] found — finalize current segment
+        const beforeSep = buffer.slice(0, sepIndex);
+        buffer = buffer.slice(sepIndex + '[SEP]'.length);
+
+        let finalText = segmentBuffer + beforeSep;
+        segmentBuffer = '';
+        prefixStripped = false;
+
+        finalText = stripNumberPrefix(finalText).trim();
+
+        if (segmentIndex >= expectedCount) {
+          console.warn(
+            `[mytr] parseSepStream: yielded segment index ${segmentIndex} exceeds expectedCount ${expectedCount}`,
+          );
+        }
+
+        yield { index: segmentIndex, text: finalText, done: true };
         segmentIndex++;
       }
     }
   }
 
-  // Yield remaining buffer as last segment
-  const remaining = buffer.trim();
+  // Flush any remaining content as the last segment
+  let remaining = (segmentBuffer + buffer).trim();
+  remaining = stripNumberPrefix(remaining).trim();
+
   if (remaining) {
-    yield { index: segmentIndex, text: stripNumberPrefix(remaining) };
+    if (segmentIndex >= expectedCount) {
+      console.warn(
+        `[mytr] parseSepStream: yielded segment index ${segmentIndex} exceeds expectedCount ${expectedCount}`,
+      );
+    }
+    yield { index: segmentIndex, text: remaining, done: true };
   }
 }
 

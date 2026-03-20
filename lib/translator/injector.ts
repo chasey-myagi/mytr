@@ -1,6 +1,6 @@
 import type { DisplayMode } from '../providers/types';
 
-export function injectTranslation(blockId: string, sourceElement: Element): HTMLElement {
+export function injectTranslation(blockId: string, sourceElement: Element, targetLang = 'zh'): HTMLElement {
   // Check if translation already exists
   const existing = document.querySelector(`[data-mytr-for="${blockId}"]`) as HTMLElement;
   if (existing) return existing;
@@ -8,7 +8,7 @@ export function injectTranslation(blockId: string, sourceElement: Element): HTML
   const translation = document.createElement(sourceElement.tagName);
   translation.className = 'mytr-translation';
   translation.setAttribute('data-mytr-for', blockId);
-  translation.setAttribute('lang', 'zh');
+  translation.setAttribute('lang', targetLang);
 
   // Style: visually distinguish from source
   translation.style.opacity = '0.85';

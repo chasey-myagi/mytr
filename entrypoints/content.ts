@@ -4,7 +4,7 @@ import { setupSelectionListeners, createTooltip, appendToTooltip, removeTooltip,
 import { createBatches } from '../lib/translator/batcher';
 import { createVisibilityObserver, createMutationWatcher, createRouteWatcher } from '../lib/translator/observer';
 import { sendToBackground, createMessage } from '../lib/messaging/bridge';
-import { getPreferences, getProviderConfig } from '../lib/storage/settings';
+import { getPreferences, getProviderConfig, getSiteRules } from '../lib/storage/settings';
 import type { DisplayMode, TextBlock } from '../lib/providers/types';
 import type { ExtractAndTranslatePayload } from '../lib/messaging/bridge';
 
@@ -29,8 +29,19 @@ export default defineContentScript({
     const pendingVisible = new Set<string>(); // blockIds queued for translation
     const pendingBlocks = new Map<string, TextBlock>(); // blockId -> TextBlock
 
-    // Setup selection listeners based on user preferences
-    const prefs = await getPreferences().catch(() => null);
+    // Check site rules before registering any listeners
+    const [prefs, siteRules] = await Promise.all([
+      getPreferences().catch(() => null),
+      getSiteRules().catch(() => null),
+    ]);
+
+    const hostname = location.hostname;
+
+    if (siteRules?.neverTranslate.includes(hostname)) {
+      // Site is in neverTranslate list — do not register any listeners
+      return;
+    }
+
     if (prefs) {
       cleanupSelection = setupSelectionListeners(
         (text, rect) => {
@@ -42,6 +53,11 @@ export default defineContentScript({
         },
         prefs.selectionMode,
       );
+    }
+
+    // Auto-trigger page translation if hostname is in alwaysTranslate list
+    if (siteRules?.alwaysTranslate.includes(hostname)) {
+      triggerPageTranslation().catch(console.error);
     }
 
     // Listen for messages from background
@@ -160,7 +176,7 @@ export default defineContentScript({
 
         // Create translation elements immediately
         for (const block of visibleBlocks) {
-          injectTranslation(block.id, block.element);
+          injectTranslation(block.id, block.element, currentPageContext!.targetLang);
         }
 
         // Send batches to background for translation
@@ -185,37 +201,17 @@ export default defineContentScript({
 
       // Watch for DOM mutations (SPA navigation / dynamic content)
       mutationWatcher = createMutationWatcher((addedNodes) => {
-        if (!currentPageContext || !isTranslating) return;
+        if (!currentPageContext || !isTranslating || !visibilityObserver) return;
 
-        const newBlocks: TextBlock[] = [];
         for (const node of addedNodes) {
           const extracted = extractTextBlocks(node as Element);
           for (const block of extracted) {
             if (!pendingBlocks.has(block.id)) {
               pendingBlocks.set(block.id, block);
-              newBlocks.push(block);
+              // Register with visibilityObserver so lazy translation works correctly
+              visibilityObserver!.observe(block.element);
             }
           }
-        }
-
-        if (newBlocks.length === 0) return;
-
-        for (const block of newBlocks) {
-          injectTranslation(block.id, block.element);
-          pendingVisible.add(block.id);
-        }
-
-        const batches = createBatches(newBlocks, BATCH_MAX_BLOCKS, BATCH_MAX_CHARS);
-        for (const batch of batches) {
-          sendToBackground('translate-batch', {
-            blocks: batch.map((b) => ({ id: b.id, text: b.text })),
-            content: '',
-            pageContext: currentPageContext!.pageContext,
-            targetLang: currentPageContext!.targetLang,
-            sourceLang: currentPageContext!.sourceLang,
-            style: currentPageContext!.style,
-            customPrompt: currentPageContext!.customPrompt,
-          }).catch(console.error);
         }
       });
 
@@ -251,8 +247,8 @@ export default defineContentScript({
       removeAllTranslations();
       removeTooltip();
 
-      // Notify background to abort streaming
-      chrome.tabs.getCurrent?.().then?.(() => {}).catch?.(() => {});
+      // Notify background to abort any ongoing streaming for this tab
+      sendToBackground('stop-translation', { tabId: 0 }).catch(() => {});
     }
 
     function toggleDisplayMode() {

@@ -48,8 +48,11 @@ export class TranslationCache {
     const key = await makeKey(text, sourceLang, targetLang, provider, model);
     const entry = store[key];
     if (!entry) return undefined;
-    // Update timestamp for LRU
+    // Update timestamp for LRU. We persist immediately to maintain correct LRU
+    // ordering across restarts; this is a trade-off: one extra storage write per
+    // cache hit for correctness.
     entry.timestamp = Date.now();
+    await this.save();
     return entry.value;
   }
 

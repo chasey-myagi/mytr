@@ -16,7 +16,7 @@ export class ClaudeProvider implements TranslationProvider {
   }
 
   async *translate(request: TranslateRequest): AsyncIterable<string> {
-    const systemPrompt = buildSystemPrompt(request.targetLang, request.style, '');
+    const systemPrompt = buildSystemPrompt(request.targetLang, request.style, request.customPrompt ?? '');
 
     const messages: Array<{ role: string; content: string }> = [];
     if (request.context) {
@@ -32,6 +32,7 @@ export class ClaudeProvider implements TranslationProvider {
         'Content-Type': 'application/json',
         'x-api-key': this.config.apiKey,
         'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
       },
       body: JSON.stringify({
         model: this.config.model,
@@ -40,6 +41,7 @@ export class ClaudeProvider implements TranslationProvider {
         messages,
         stream: true,
       }),
+      signal: request.signal,
     });
 
     if (!response.ok) {

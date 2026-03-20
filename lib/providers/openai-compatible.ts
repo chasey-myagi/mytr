@@ -16,7 +16,7 @@ export class OpenAICompatibleProvider implements TranslationProvider {
   }
 
   async *translate(request: TranslateRequest): AsyncIterable<string> {
-    const systemPrompt = buildSystemPrompt(request.targetLang, request.style, '');
+    const systemPrompt = buildSystemPrompt(request.targetLang, request.style, request.customPrompt ?? '');
     const messages: Array<{ role: string; content: string }> = [
       { role: 'system', content: systemPrompt },
     ];
@@ -39,6 +39,7 @@ export class OpenAICompatibleProvider implements TranslationProvider {
         messages,
         stream: true,
       }),
+      signal: request.signal,
     });
 
     if (!response.ok) {

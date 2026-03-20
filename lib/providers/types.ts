@@ -4,6 +4,8 @@ export interface TranslateRequest {
   targetLang: string;
   style: string;
   context?: string;
+  signal?: AbortSignal;
+  customPrompt?: string;
 }
 
 export interface TranslationProvider {

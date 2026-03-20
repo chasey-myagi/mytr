@@ -122,6 +122,8 @@ export default defineBackground(() => {
             targetLang: payload.targetLang,
             style: payload.style,
             context: payload.pageContext || undefined,
+            customPrompt: payload.customPrompt || undefined,
+            signal: abortController.signal,
           }))
         );
 
@@ -135,38 +137,45 @@ export default defineBackground(() => {
           const blockId = blockIds[segment.index];
           if (!blockId) continue;
 
-          chrome.tabs.sendMessage(tabId, createMessage('translation-chunk', {
-            blockId,
-            chunk: segment.text,
-            done: false,
-          }));
+          if (!segment.done) {
+            // Partial chunk — stream to content script for immediate display
+            chrome.tabs.sendMessage(tabId, createMessage('translation-chunk', {
+              blockId,
+              chunk: segment.text,
+              done: false,
+            }));
+            blockAccumulated.set(blockId, (blockAccumulated.get(blockId) ?? '') + segment.text);
+          } else {
+            // Segment finalized by [SEP] or end-of-stream.
+            // segment.text contains any remaining unreported text for this segment
+            // (prefix-stripped content that was held back until [SEP] arrived).
+            if (segment.text) {
+              chrome.tabs.sendMessage(tabId, createMessage('translation-chunk', {
+                blockId,
+                chunk: segment.text,
+                done: false,
+              }));
+              blockAccumulated.set(blockId, (blockAccumulated.get(blockId) ?? '') + segment.text);
+            }
+            chrome.tabs.sendMessage(tabId, createMessage('translation-chunk', {
+              blockId,
+              chunk: '',
+              done: true,
+            }));
 
-          blockAccumulated.set(blockId, (blockAccumulated.get(blockId) ?? '') + segment.text);
-        }
-
-        if (abortController.signal.aborted) return;
-
-        // Send done signals and persist to cache
-        for (let i = 0; i < blockIds.length; i++) {
-          const blockId = blockIds[i];
-          const block = uncachedBlocks[i];
-          const fullTranslation = blockAccumulated.get(blockId) ?? '';
-
-          chrome.tabs.sendMessage(tabId, createMessage('translation-chunk', {
-            blockId,
-            chunk: '',
-            done: true,
-          }));
-
-          if (fullTranslation) {
-            await cache.set(
-              block.text,
-              payload.sourceLang,
-              payload.targetLang,
-              providerName,
-              model,
-              fullTranslation,
-            );
+            // Persist full accumulated translation to cache
+            const fullTranslation = blockAccumulated.get(blockId) ?? '';
+            const block = uncachedBlocks[segment.index];
+            if (block && fullTranslation) {
+              await cache.set(
+                block.text,
+                payload.sourceLang,
+                payload.targetLang,
+                providerName,
+                model,
+                fullTranslation,
+              );
+            }
           }
         }
 
