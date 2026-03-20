@@ -47,7 +47,10 @@ export class OpenAICompatibleProvider implements TranslationProvider {
       throw new Error(`API error ${response.status}: ${errorText}`);
     }
 
-    const reader = response.body!.getReader();
+    if (!response.body) {
+      throw new Error('OpenAI API response has no body — streaming not supported in this environment');
+    }
+    const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
 

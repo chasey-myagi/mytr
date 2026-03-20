@@ -2,7 +2,7 @@ import { extractTextBlocks } from '../lib/translator/extractor';
 import { injectTranslation, appendToTranslation, removeAllTranslations, setDisplayMode } from '../lib/translator/injector';
 import { setupSelectionListeners, createTooltip, appendToTooltip, removeTooltip, getSelectedText } from '../lib/translator/selector';
 import { createBatches } from '../lib/translator/batcher';
-import { createVisibilityObserver, createMutationWatcher, createRouteWatcher } from '../lib/translator/observer';
+import { createVisibilityObserver, createMutationWatcher, createRouteWatcher, debounce } from '../lib/translator/observer';
 import { sendToBackground, createMessage } from '../lib/messaging/bridge';
 import { getPreferences, getProviderConfig, getSiteRules } from '../lib/storage/settings';
 import type { DisplayMode, TextBlock } from '../lib/providers/types';
@@ -40,6 +40,12 @@ export default defineContentScript({
     if (siteRules?.neverTranslate.includes(hostname)) {
       // Site is in neverTranslate list — do not register any listeners
       return;
+    }
+
+    // Wrap removeTooltip so closing always cancels the background selection translation
+    function cancelAndRemoveTooltip() {
+      removeTooltip();
+      sendToBackground('cancel-selection', {}).catch(() => {});
     }
 
     if (prefs) {
@@ -118,6 +124,9 @@ export default defineContentScript({
           }
           break;
         }
+        case 'close-tooltip':
+          cancelAndRemoveTooltip();
+          break;
       }
     }
 
@@ -199,8 +208,9 @@ export default defineContentScript({
         visibilityObserver.observe(block.element);
       }
 
-      // Watch for DOM mutations (SPA navigation / dynamic content)
-      mutationWatcher = createMutationWatcher((addedNodes) => {
+      // Debounced handler for MutationObserver — SPA reconciliation can fire
+      // many mutations in rapid succession; wait 500ms before extracting blocks.
+      const debouncedMutationHandler = debounce((addedNodes: Element[]) => {
         if (!currentPageContext || !isTranslating || !visibilityObserver) return;
 
         for (const node of addedNodes) {
@@ -213,6 +223,11 @@ export default defineContentScript({
             }
           }
         }
+      }, 500);
+
+      // Watch for DOM mutations (SPA navigation / dynamic content)
+      mutationWatcher = createMutationWatcher((addedNodes) => {
+        debouncedMutationHandler(addedNodes);
       });
 
       // Watch for route changes (SPA)
@@ -245,9 +260,10 @@ export default defineContentScript({
       cleanupRoute = null;
 
       removeAllTranslations();
-      removeTooltip();
+      cancelAndRemoveTooltip();
 
-      // Notify background to abort any ongoing streaming for this tab
+      // Notify background to abort any ongoing streaming for this tab.
+      // tabId: 0 is a placeholder — background uses sender.tab.id instead.
       sendToBackground('stop-translation', { tabId: 0 }).catch(() => {});
     }
 
@@ -257,6 +273,13 @@ export default defineContentScript({
       currentDisplayMode = modes[(currentIndex + 1) % modes.length];
       setDisplayMode(currentDisplayMode);
     }
+
+    // Keyboard shortcut: Escape closes tooltip and cancels selection translation
+    document.addEventListener('keydown', (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        cancelAndRemoveTooltip();
+      }
+    });
 
     // Cleanup on unload
     window.addEventListener('beforeunload', () => {

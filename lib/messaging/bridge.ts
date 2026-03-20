@@ -64,6 +64,7 @@ export interface MessageMap {
   'translate-page': TranslatePagePayload;
   'translate-selection': TranslateSelectionPayload;
   'stop-translation': StopTranslationPayload;
+  'cancel-selection': Record<string, never>;
   'translation-chunk': TranslationChunkPayload;
   'toggle-display-mode': ToggleDisplayModePayload;
   'translate-batch': TranslateBatchPayload;

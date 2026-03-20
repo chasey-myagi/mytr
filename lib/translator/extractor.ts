@@ -12,16 +12,35 @@ const SKIP_TAGS = new Set([
 ]);
 
 export function extractTextBlocks(root: Element): TextBlock[] {
-  // Prioritize article/main if present
-  const mainContent =
-    root.querySelector('article') ??
-    root.querySelector('main') ??
-    root.querySelector('[role="main"]');
-
-  const container = mainContent ?? root;
   const blocks: TextBlock[] = [];
 
-  walkElement(container, blocks);
+  // Prefer semantic content containers. Use querySelectorAll to capture ALL
+  // article and main elements (e.g. GitHub issues, Reddit threads).
+  const articles = Array.from(root.querySelectorAll('article'));
+  const mains = Array.from(root.querySelectorAll('main'));
+  const roleMain = Array.from(root.querySelectorAll('[role="main"]'));
+
+  const containers: Element[] = [...articles, ...mains, ...roleMain];
+
+  // Deduplicate (e.g. a <main> that also has role="main")
+  const seen = new Set<Element>();
+  const uniqueContainers: Element[] = [];
+  for (const el of containers) {
+    if (!seen.has(el)) {
+      seen.add(el);
+      uniqueContainers.push(el);
+    }
+  }
+
+  if (uniqueContainers.length > 0) {
+    for (const container of uniqueContainers) {
+      walkElement(container, blocks);
+    }
+  } else {
+    // Fallback: walk the entire root
+    walkElement(root, blocks);
+  }
+
   return blocks;
 }
 
@@ -34,7 +53,8 @@ function walkElement(element: Element, blocks: TextBlock[]): void {
 
   if (TRANSLATABLE_TAGS.has(tag)) {
     const text = element.textContent?.trim();
-    if (text && text.length >= 1 && !isOnlySymbolsOrNumbers(text)) {
+    // Skip very short strings (single characters, buttons like "OK", "No")
+    if (text && text.length >= 4 && !isOnlySymbolsOrNumbers(text)) {
       const id = `mytr-${crypto.randomUUID().slice(0, 8)}`;
       element.setAttribute('data-mytr-id', id);
       blocks.push({ id, element, text });

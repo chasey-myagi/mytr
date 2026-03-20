@@ -70,7 +70,7 @@ describe('extractTextBlocks', () => {
   });
 
   it('assigns unique IDs to each block', () => {
-    createPage('<p>A</p><p>B</p><p>C</p>');
+    createPage('<p>First paragraph</p><p>Second paragraph</p><p>Third paragraph</p>');
     const blocks = extractTextBlocks(document.body);
     const ids = blocks.map((b) => b.id);
     expect(new Set(ids).size).toBe(3);

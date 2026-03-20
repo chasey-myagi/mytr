@@ -49,7 +49,10 @@ export class ClaudeProvider implements TranslationProvider {
       throw new Error(`Claude API error ${response.status}: ${errorText}`);
     }
 
-    const reader = response.body!.getReader();
+    if (!response.body) {
+      throw new Error('Claude API response has no body — streaming not supported in this environment');
+    }
+    const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
 

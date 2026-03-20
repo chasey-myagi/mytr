@@ -48,11 +48,10 @@ export class TranslationCache {
     const key = await makeKey(text, sourceLang, targetLang, provider, model);
     const entry = store[key];
     if (!entry) return undefined;
-    // Update timestamp for LRU. We persist immediately to maintain correct LRU
-    // ordering across restarts; this is a trade-off: one extra storage write per
-    // cache hit for correctness.
-    entry.timestamp = Date.now();
-    await this.save();
+    // LRU ordering is based on set() time, not last-access time. We intentionally
+    // skip updating the timestamp here to avoid a full chrome.storage.local write
+    // on every cache hit. This means infrequently-read entries may be evicted
+    // before recently-read-but-older ones — an acceptable approximation of LRU.
     return entry.value;
   }
 

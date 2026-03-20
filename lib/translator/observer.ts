@@ -72,8 +72,26 @@ export function createRouteWatcher(onRouteChange: () => void): () => void {
   window.addEventListener('popstate', handler);
   window.addEventListener('hashchange', handler);
 
+  // Monkey-patch history.pushState and history.replaceState so SPA navigation
+  // (which does not fire popstate) is also detected.
+  const originalPushState = history.pushState.bind(history);
+  const originalReplaceState = history.replaceState.bind(history);
+
+  history.pushState = (...args) => {
+    originalPushState(...args);
+    handler();
+  };
+
+  history.replaceState = (...args) => {
+    originalReplaceState(...args);
+    handler();
+  };
+
   return () => {
     window.removeEventListener('popstate', handler);
     window.removeEventListener('hashchange', handler);
+    // Restore original history methods
+    history.pushState = originalPushState;
+    history.replaceState = originalReplaceState;
   };
 }

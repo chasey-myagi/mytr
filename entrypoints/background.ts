@@ -10,8 +10,12 @@ import type { TranslateBatchPayload, TranslateSelectionPayload } from '../lib/me
 
 const cache = new TranslationCache();
 
-// Track active abort controllers per tab
-const activeTranslations = new Map<number, AbortController>();
+// Track active abort controllers per tab — each batch gets its own controller,
+// stored in a Set so multiple concurrent batches don't abort each other.
+const activeTranslations = new Map<number, Set<AbortController>>();
+
+// Track per-tab selection AbortController (tooltip translations)
+const activeSelections = new Map<number, AbortController>();
 
 async function getProvider(): Promise<{ provider: TranslationProvider; providerName: string; model: string }> {
   const config = await getProviderConfig();
@@ -35,6 +39,11 @@ async function withRetry<T>(
       return await fn();
     } catch (err) {
       lastError = err;
+      // Do not retry on client errors (4xx) — they will not succeed on retry
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/\b(400|401|403)\b/.test(msg)) {
+        throw err;
+      }
       if (attempt < maxAttempts - 1) {
         await new Promise((resolve) => setTimeout(resolve, baseDelayMs * Math.pow(2, attempt)));
       }
@@ -44,222 +53,260 @@ async function withRetry<T>(
 }
 
 export default defineBackground(() => {
-  // Handle translate-page: fetch settings and forward to content script as extract-and-translate
-  chrome.runtime.onMessage.addListener((message, _sender) => {
-    if (message.type !== 'translate-page') return;
+  // Single onMessage listener — use a switch for all message types.
+  // Async handlers return `true` so the message channel stays open.
+  chrome.runtime.onMessage.addListener((message, sender, _sendResponse) => {
+    if (!message?.type) return;
 
-    const payload = message.payload as { tabId: number; pageContext: { title: string; hostname: string } };
-    const targetTabId = payload.tabId;
+    switch (message.type) {
+      case 'translate-page': {
+        const payload = message.payload as { tabId: number; pageContext: { title: string; hostname: string } };
+        const targetTabId = payload.tabId;
 
-    (async () => {
-      try {
-        const [prefs, providerConfig] = await Promise.all([getPreferences(), getProviderConfig()]);
+        (async () => {
+          try {
+            const [prefs, providerConfig] = await Promise.all([getPreferences(), getProviderConfig()]);
 
-        chrome.tabs.sendMessage(targetTabId, createMessage('extract-and-translate', {
-          pageContext: `页面：${payload.pageContext.title}\n来源：${payload.pageContext.hostname}`,
-          targetLang: prefs.targetLang,
-          sourceLang: prefs.sourceLang,
-          style: prefs.style,
-          customPrompt: prefs.customPrompt,
-          provider: providerConfig.provider,
-          model: providerConfig.model,
-        }));
-      } catch (err) {
-        console.error('[mytr] translate-page error:', err);
-      }
-    })();
-  });
-
-  // Handle translate-batch: core translation flow
-  chrome.runtime.onMessage.addListener((message, sender) => {
-    if (message.type !== 'translate-batch') return;
-
-    const payload = message.payload as TranslateBatchPayload;
-    const tabId = sender.tab?.id;
-    if (!tabId) return;
-
-    (async () => {
-      try {
-        // Abort any existing translation for this tab
-        activeTranslations.get(tabId)?.abort();
-        const abortController = new AbortController();
-        activeTranslations.set(tabId, abortController);
-
-        const { provider, providerName, model } = await getProvider();
-
-        // Check cache for each block
-        const uncachedBlocks: Array<{ id: string; text: string }> = [];
-
-        for (const block of payload.blocks) {
-          const cached = await cache.get(
-            block.text,
-            payload.sourceLang,
-            payload.targetLang,
-            providerName,
-            model,
-          );
-          if (cached !== undefined) {
-            // Send cached result immediately as a single chunk
-            chrome.tabs.sendMessage(tabId, createMessage('translation-chunk', {
-              blockId: block.id,
-              chunk: cached,
-              done: true,
+            chrome.tabs.sendMessage(targetTabId, createMessage('extract-and-translate', {
+              pageContext: `页面：${payload.pageContext.title}\n来源：${payload.pageContext.hostname}`,
+              targetLang: prefs.targetLang,
+              sourceLang: prefs.sourceLang,
+              style: prefs.style,
+              customPrompt: prefs.customPrompt,
+              provider: providerConfig.provider,
+              model: providerConfig.model,
             }));
-          } else {
-            uncachedBlocks.push(block);
+          } catch (err) {
+            console.error('[mytr] translate-page error:', err);
           }
-        }
+        })();
+        return true;
+      }
 
-        if (uncachedBlocks.length === 0 || abortController.signal.aborted) return;
+      case 'translate-batch': {
+        const payload = message.payload as TranslateBatchPayload;
+        const tabId = sender.tab?.id;
+        if (!tabId) return;
 
-        // Build combined content for uncached blocks
-        const content = buildTranslationContent(uncachedBlocks.map((b) => b.text));
+        (async () => {
+          try {
+            const abortController = new AbortController();
 
-        const stream = await withRetry(() =>
-          Promise.resolve(provider.translate({
-            text: content,
-            sourceLang: payload.sourceLang,
-            targetLang: payload.targetLang,
-            style: payload.style,
-            context: payload.pageContext || undefined,
-            customPrompt: payload.customPrompt || undefined,
-            signal: abortController.signal,
-          }))
-        );
-
-        const blockIds = uncachedBlocks.map((b) => b.id);
-        // Accumulate full text per block for caching
-        const blockAccumulated = new Map<string, string>(uncachedBlocks.map((b) => [b.id, '']));
-
-        for await (const segment of parseSepStream(stream, uncachedBlocks.length)) {
-          if (abortController.signal.aborted) break;
-
-          const blockId = blockIds[segment.index];
-          if (!blockId) continue;
-
-          if (!segment.done) {
-            // Partial chunk — stream to content script for immediate display
-            chrome.tabs.sendMessage(tabId, createMessage('translation-chunk', {
-              blockId,
-              chunk: segment.text,
-              done: false,
-            }));
-            blockAccumulated.set(blockId, (blockAccumulated.get(blockId) ?? '') + segment.text);
-          } else {
-            // Segment finalized by [SEP] or end-of-stream.
-            // segment.text contains any remaining unreported text for this segment
-            // (prefix-stripped content that was held back until [SEP] arrived).
-            if (segment.text) {
-              chrome.tabs.sendMessage(tabId, createMessage('translation-chunk', {
-                blockId,
-                chunk: segment.text,
-                done: false,
-              }));
-              blockAccumulated.set(blockId, (blockAccumulated.get(blockId) ?? '') + segment.text);
+            // Add this batch's controller to the tab's set
+            if (!activeTranslations.has(tabId)) {
+              activeTranslations.set(tabId, new Set());
             }
-            chrome.tabs.sendMessage(tabId, createMessage('translation-chunk', {
-              blockId,
-              chunk: '',
-              done: true,
-            }));
+            activeTranslations.get(tabId)!.add(abortController);
 
-            // Persist full accumulated translation to cache
-            const fullTranslation = blockAccumulated.get(blockId) ?? '';
-            const block = uncachedBlocks[segment.index];
-            if (block && fullTranslation) {
-              await cache.set(
+            const { provider, providerName, model } = await getProvider();
+
+            // Check cache for each block
+            const uncachedBlocks: Array<{ id: string; text: string }> = [];
+
+            for (const block of payload.blocks) {
+              const cached = await cache.get(
                 block.text,
                 payload.sourceLang,
                 payload.targetLang,
                 providerName,
                 model,
-                fullTranslation,
               );
+              if (cached !== undefined) {
+                // Send cached result immediately as a single chunk
+                chrome.tabs.sendMessage(tabId, createMessage('translation-chunk', {
+                  blockId: block.id,
+                  chunk: cached,
+                  done: true,
+                }));
+              } else {
+                uncachedBlocks.push(block);
+              }
             }
+
+            if (uncachedBlocks.length === 0 || abortController.signal.aborted) {
+              activeTranslations.get(tabId)?.delete(abortController);
+              return;
+            }
+
+            // Build combined content for uncached blocks
+            const content = buildTranslationContent(uncachedBlocks.map((b) => b.text));
+
+            const stream = await withRetry(() =>
+              Promise.resolve(provider.translate({
+                text: content,
+                sourceLang: payload.sourceLang,
+                targetLang: payload.targetLang,
+                style: payload.style,
+                context: payload.pageContext || undefined,
+                customPrompt: payload.customPrompt || undefined,
+                signal: abortController.signal,
+              }))
+            );
+
+            const blockIds = uncachedBlocks.map((b) => b.id);
+            // Accumulate full text per block for caching
+            const blockAccumulated = new Map<string, string>(uncachedBlocks.map((b) => [b.id, '']));
+
+            for await (const segment of parseSepStream(stream, uncachedBlocks.length)) {
+              if (abortController.signal.aborted) break;
+
+              const blockId = blockIds[segment.index];
+              if (!blockId) continue;
+
+              if (!segment.done) {
+                // Partial chunk — stream to content script for immediate display
+                chrome.tabs.sendMessage(tabId, createMessage('translation-chunk', {
+                  blockId,
+                  chunk: segment.text,
+                  done: false,
+                }));
+                blockAccumulated.set(blockId, (blockAccumulated.get(blockId) ?? '') + segment.text);
+              } else {
+                // Segment finalized by [SEP] or end-of-stream.
+                if (segment.text) {
+                  chrome.tabs.sendMessage(tabId, createMessage('translation-chunk', {
+                    blockId,
+                    chunk: segment.text,
+                    done: false,
+                  }));
+                  blockAccumulated.set(blockId, (blockAccumulated.get(blockId) ?? '') + segment.text);
+                }
+                chrome.tabs.sendMessage(tabId, createMessage('translation-chunk', {
+                  blockId,
+                  chunk: '',
+                  done: true,
+                }));
+
+                // Persist full accumulated translation to cache
+                const fullTranslation = blockAccumulated.get(blockId) ?? '';
+                const block = uncachedBlocks[segment.index];
+                if (block && fullTranslation) {
+                  await cache.set(
+                    block.text,
+                    payload.sourceLang,
+                    payload.targetLang,
+                    providerName,
+                    model,
+                    fullTranslation,
+                  );
+                }
+              }
+            }
+
+            // Remove this batch's controller once complete
+            activeTranslations.get(tabId)?.delete(abortController);
+            if (activeTranslations.get(tabId)?.size === 0) {
+              activeTranslations.delete(tabId);
+            }
+          } catch (err) {
+            console.error('[mytr] translate-batch error:', err);
           }
-        }
-
-        activeTranslations.delete(tabId);
-      } catch (err) {
-        console.error('[mytr] translate-batch error:', err);
+        })();
+        return true;
       }
-    })();
-  });
 
-  // Handle translate-selection: stream translation of selected text
-  chrome.runtime.onMessage.addListener((message, sender) => {
-    if (message.type !== 'translate-selection') return;
+      case 'translate-selection': {
+        const payload = message.payload as TranslateSelectionPayload;
+        const tabId = sender.tab?.id;
+        if (!tabId) return;
 
-    const payload = message.payload as TranslateSelectionPayload;
-    const tabId = sender.tab?.id ?? payload.tabId;
-    if (!tabId) return;
+        (async () => {
+          try {
+            // Abort any in-progress selection translation for this tab
+            activeSelections.get(tabId)?.abort();
+            const abortController = new AbortController();
+            activeSelections.set(tabId, abortController);
 
-    (async () => {
-      try {
-        const [prefs, { provider, providerName, model }] = await Promise.all([
-          getPreferences(),
-          getProvider(),
-        ]);
+            const [prefs, { provider, providerName, model }] = await Promise.all([
+              getPreferences(),
+              getProvider(),
+            ]);
 
-        // Check cache first
-        const cached = await cache.get(
-          payload.text,
-          prefs.sourceLang,
-          prefs.targetLang,
-          providerName,
-          model,
-        );
+            // Check cache first
+            const cached = await cache.get(
+              payload.text,
+              prefs.sourceLang,
+              prefs.targetLang,
+              providerName,
+              model,
+            );
 
-        if (cached !== undefined) {
-          chrome.tabs.sendMessage(tabId, createMessage('selection-chunk', { chunk: cached, done: true }));
-          return;
-        }
+            if (cached !== undefined) {
+              chrome.tabs.sendMessage(tabId, createMessage('selection-chunk', { chunk: cached, done: true }));
+              activeSelections.delete(tabId);
+              return;
+            }
 
-        const stream = provider.translate({
-          text: payload.text,
-          sourceLang: prefs.sourceLang,
-          targetLang: prefs.targetLang,
-          style: prefs.style,
-          context: undefined,
-        });
+            const stream = provider.translate({
+              text: payload.text,
+              sourceLang: prefs.sourceLang,
+              targetLang: prefs.targetLang,
+              style: prefs.style,
+              context: undefined,
+              signal: abortController.signal,
+            });
 
-        let fullTranslation = '';
+            let fullTranslation = '';
 
-        for await (const chunk of stream) {
-          chrome.tabs.sendMessage(tabId, createMessage('selection-chunk', { chunk, done: false }));
-          fullTranslation += chunk;
-        }
+            for await (const chunk of stream) {
+              if (abortController.signal.aborted) break;
+              chrome.tabs.sendMessage(tabId, createMessage('selection-chunk', { chunk, done: false }));
+              fullTranslation += chunk;
+            }
 
-        chrome.tabs.sendMessage(tabId, createMessage('selection-chunk', { chunk: '', done: true }));
+            if (!abortController.signal.aborted) {
+              chrome.tabs.sendMessage(tabId, createMessage('selection-chunk', { chunk: '', done: true }));
 
-        if (fullTranslation) {
-          await cache.set(
-            payload.text,
-            prefs.sourceLang,
-            prefs.targetLang,
-            providerName,
-            model,
-            fullTranslation,
-          );
-        }
-      } catch (err) {
-        console.error('[mytr] translate-selection error:', err);
-        chrome.tabs.sendMessage(tabId, createMessage('selection-error', {
-          error: err instanceof Error ? err.message : String(err),
-        }));
+              if (fullTranslation) {
+                await cache.set(
+                  payload.text,
+                  prefs.sourceLang,
+                  prefs.targetLang,
+                  providerName,
+                  model,
+                  fullTranslation,
+                );
+              }
+            }
+
+            activeSelections.delete(tabId);
+          } catch (err) {
+            console.error('[mytr] translate-selection error:', err);
+            chrome.tabs.sendMessage(tabId, createMessage('selection-error', {
+              error: err instanceof Error ? err.message : String(err),
+            }));
+          }
+        })();
+        return true;
       }
-    })();
-  });
 
-  // Handle stop-translation: abort active streaming
-  chrome.runtime.onMessage.addListener((message) => {
-    if (message.type !== 'stop-translation') return;
+      case 'stop-translation': {
+        // Use sender.tab?.id — content script passes tabId: 0 as a placeholder
+        const tabId = sender.tab?.id;
+        if (!tabId) return;
 
-    const payload = message.payload as { tabId: number };
-    const controller = activeTranslations.get(payload.tabId);
-    if (controller) {
-      controller.abort();
-      activeTranslations.delete(payload.tabId);
+        // Abort all active batch controllers for this tab
+        const controllers = activeTranslations.get(tabId);
+        if (controllers) {
+          for (const ctrl of controllers) {
+            ctrl.abort();
+          }
+          activeTranslations.delete(tabId);
+        }
+
+        // Abort any active selection translation for this tab
+        activeSelections.get(tabId)?.abort();
+        activeSelections.delete(tabId);
+        break;
+      }
+
+      case 'cancel-selection': {
+        const tabId = sender.tab?.id;
+        if (!tabId) return;
+        activeSelections.get(tabId)?.abort();
+        activeSelections.delete(tabId);
+        break;
+      }
     }
   });
 
